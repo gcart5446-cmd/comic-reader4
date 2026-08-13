@@ -159,6 +159,7 @@ object ComicParser {
 
         // Clean up old extracted comic caches if total cache exceeds 500 MB
         cleanCacheDirIfNeeded(File(context.cacheDir, "extracted_comics"), maxSizeBytes = 500 * 1024 * 1024L)
+        cleanFileCacheIfNeeded(File(context.cacheDir, "split_pages"), maxSizeBytes = 300 * 1024 * 1024L)
 
         // 1. Check if comic is already extracted and cached
         if (cacheBaseDir.exists()) {
@@ -302,8 +303,12 @@ object ComicParser {
 
         baseDir.walkTopDown().forEach { file ->
             if (file.isFile && file.name != "source_temp.bin") {
-                val name = file.name
-                if (!name.startsWith(".") && !name.startsWith("__MACOSX")) {
+                val relPath = file.relativeTo(baseDir).path
+                val segments = relPath.split('/', '\\')
+                val isJunk = segments.any { seg ->
+                    seg.startsWith(".") || seg == "__MACOSX" || seg == "Thumbs.db"
+                }
+                if (!isJunk) {
                     val ext = file.extension.lowercase(Locale.ROOT)
                     if (IMAGE_EXTENSIONS.contains(ext) && file.length() > 0) {
                         imageFiles.add(file)
@@ -810,20 +815,20 @@ object ComicParser {
         return false
     }
 
+    private const val PDF_RENDER_DPI = 150
+
     private fun extractPdfPages(pdfFile: File, destDir: File) {
         try {
             ParcelFileDescriptor.open(pdfFile, ParcelFileDescriptor.MODE_READ_ONLY)?.use { pfd ->
                 PdfRenderer(pfd).use { pdfRenderer ->
                     val pageCount = pdfRenderer.pageCount
                     Log.d(TAG, "Rendering PDF with $pageCount pages")
+                    val scale = PDF_RENDER_DPI / 72f
 
                     for (i in 0 until pageCount) {
                         pdfRenderer.openPage(i).use { page ->
                             val pageW = page.width
                             val pageH = page.height
-                            val targetW = 1440
-                            val scale = if (pageW > 0) (targetW.toFloat() / pageW.toFloat()).coerceAtLeast(1.0f) else 1.5f
-
                             val width = (pageW * scale).toInt().coerceAtLeast(600)
                             val height = (pageH * scale).toInt().coerceAtLeast(800)
 
@@ -1015,6 +1020,26 @@ object ComicParser {
             }
         } catch (e: Exception) {
             Log.w(TAG, "Cache eviction failed: ${e.message}")
+        }
+    }
+
+    private fun cleanFileCacheIfNeeded(cacheDir: File, maxSizeBytes: Long) {
+        if (!cacheDir.exists() || !cacheDir.isDirectory) return
+        try {
+            val files = cacheDir.listFiles()?.filter { it.isFile } ?: return
+            var totalSize = files.sumOf { it.length() }
+            if (totalSize > maxSizeBytes) {
+                val sortedFiles = files.sortedBy { it.lastModified() }
+                for (file in sortedFiles) {
+                    if (totalSize <= maxSizeBytes / 2) break
+                    val len = file.length()
+                    if (file.delete()) {
+                        totalSize -= len
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Split cache eviction failed: ${e.message}")
         }
     }
 }

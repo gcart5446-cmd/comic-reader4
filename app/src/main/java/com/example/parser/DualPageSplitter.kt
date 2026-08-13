@@ -122,35 +122,35 @@ object DualPageSplitter {
     ) {
         val halfW = w / 2
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            val decoder = BitmapRegionDecoder.newInstance(inputFile.absolutePath)
-            val leftBmp = decoder.decodeRegion(Rect(0, 0, halfW, h), null)
-            val rightBmp = decoder.decodeRegion(Rect(halfW, 0, w, h), null)
-
-            leftBmp?.let { bmp ->
-                FileOutputStream(leftFile).use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 90, out) }
-                bmp.recycle()
-            }
-            rightBmp?.let { bmp ->
-                FileOutputStream(rightFile).use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 90, out) }
-                bmp.recycle()
-            }
-            decoder.recycle()
+        val decoder: BitmapRegionDecoder? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            BitmapRegionDecoder.newInstance(inputFile.absolutePath)
         } else {
             @Suppress("DEPRECATION")
-            val decoder = BitmapRegionDecoder.newInstance(inputFile.absolutePath, false)
-            val leftBmp = decoder?.decodeRegion(Rect(0, 0, halfW, h), null)
-            val rightBmp = decoder?.decodeRegion(Rect(halfW, 0, w, h), null)
+            BitmapRegionDecoder.newInstance(inputFile.absolutePath, false)
+        }
 
+        if (decoder == null) return
+
+        try {
+            val leftBmp = decoder.decodeRegion(Rect(0, 0, halfW, h), null)
             leftBmp?.let { bmp ->
-                FileOutputStream(leftFile).use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 90, out) }
-                bmp.recycle()
+                try {
+                    FileOutputStream(leftFile).use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 90, out) }
+                } finally {
+                    bmp.recycle()
+                }
             }
+
+            val rightBmp = decoder.decodeRegion(Rect(halfW, 0, w, h), null)
             rightBmp?.let { bmp ->
-                FileOutputStream(rightFile).use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 90, out) }
-                bmp.recycle()
+                try {
+                    FileOutputStream(rightFile).use { out -> bmp.compress(Bitmap.CompressFormat.JPEG, 90, out) }
+                } finally {
+                    bmp.recycle()
+                }
             }
-            decoder?.recycle()
+        } finally {
+            decoder.recycle()
         }
     }
 }

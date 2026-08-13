@@ -38,6 +38,7 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -260,7 +261,7 @@ fun ComicReaderScreen(
     // Bidirectional Sync 1: External ViewModel state changes (initial saved page, slider, grid picker) -> UI Scroll
     LaunchedEffect(uiState.currentPageIndex, uiState.scrollMode) {
         val target = uiState.currentPageIndex.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
-        if (uiState.scrollMode == "PAGER") {
+        if (uiState.scrollMode == "PAGER" || uiState.scrollMode == "VERTICAL_PAGER") {
             if (!pagerState.isScrollInProgress && pagerState.currentPage != target) {
                 pagerState.scrollToPage(target)
             }
@@ -276,7 +277,7 @@ fun ComicReaderScreen(
         snapshotFlow { pagerState.currentPage }
             .distinctUntilChanged()
             .collect { page ->
-                if (uiState.scrollMode == "PAGER" && page != uiState.currentPageIndex) {
+                if ((uiState.scrollMode == "PAGER" || uiState.scrollMode == "VERTICAL_PAGER") && page != uiState.currentPageIndex) {
                     viewModel.onPageChanged(page)
                 }
             }
@@ -289,6 +290,16 @@ fun ComicReaderScreen(
             .collect { index ->
                 if (uiState.scrollMode == "WEBTOON" && index != uiState.currentPageIndex) {
                     viewModel.onPageChanged(index)
+                }
+            }
+    }
+
+    // Auto-hide controls when scrolling in Webtoon mode
+    LaunchedEffect(webtoonListState) {
+        snapshotFlow { webtoonListState.isScrollInProgress }
+            .collect { isScrolling ->
+                if (isScrolling && uiState.scrollMode == "WEBTOON" && uiState.isControlsVisible) {
+                    viewModel.toggleControls()
                 }
             }
     }
@@ -470,8 +481,32 @@ fun ComicReaderScreen(
                         )
                     }
                 }
+            } else if (uiState.scrollMode == "VERTICAL_PAGER") {
+                // Page-by-Page Vertical Pager Mode
+                VerticalPager(
+                    state = pagerState,
+                    modifier = Modifier.fillMaxSize()
+                ) { page ->
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        ZoomablePageImage(
+                            pageFile = uiState.pages[page],
+                            scaleType = uiState.scaleType,
+                            isCropMarginsEnabled = uiState.isCropMarginsEnabled,
+                            colorFilterType = uiState.colorFilter,
+                            onTap = handlePageTap,
+                            onLongPress = {
+                                actionTargetPageIndex = page
+                                showPageActionsSheet = true
+                            },
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                }
             } else {
-                // Page-by-Page Pager Mode
+                // Page-by-Page Horizontal Pager Mode
                 HorizontalPager(
                     state = pagerState,
                     reverseLayout = uiState.readingDirection == "RTL",
@@ -705,6 +740,11 @@ fun ComicReaderScreen(
                                     selected = uiState.scrollMode == "PAGER",
                                     onClick = { viewModel.setScrollMode("PAGER") },
                                     label = { Text("Pager", color = Color.White) }
+                                )
+                                FilterChip(
+                                    selected = uiState.scrollMode == "VERTICAL_PAGER",
+                                    onClick = { viewModel.setScrollMode("VERTICAL_PAGER") },
+                                    label = { Text("Vertical", color = Color.White) }
                                 )
                                 FilterChip(
                                     selected = uiState.scrollMode == "WEBTOON",
