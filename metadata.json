@@ -1,0 +1,6 @@
+{
+  "name": "OpenComic Reader",
+  "description": "A feature-packed local Android comic reader supporting CBZ, CBR, PDF, ZIP, RAR, 7Z, and nested archives.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
