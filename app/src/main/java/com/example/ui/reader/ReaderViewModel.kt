@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.io.File
@@ -148,7 +149,7 @@ class ReaderViewModel(
                 isRtl = (dir == "RTL")
             )
         }
-    }
+    }.flowOn(Dispatchers.IO)
 
     val uiState: StateFlow<ReaderUiState> = combine(
         _processedPages,

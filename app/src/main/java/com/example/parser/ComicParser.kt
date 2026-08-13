@@ -435,6 +435,7 @@ object ComicParser {
 
     private fun extractZipFile(zipFile: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
+        var runningTotalBytes = 0L
         try {
             ZipFile(zipFile).use { zip ->
                 val entries = zip.entries().toList()
@@ -450,7 +451,11 @@ object ComicParser {
 
                 val buffer = ByteArray(262144)
 
-                sortedEntries.forEach { entry ->
+                for (entry in sortedEntries) {
+                    if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                        Log.w(TAG, "Aborting zip extraction: total size limit exceeded")
+                        break
+                    }
                     try {
                         val outFile = File(destDir, sanitizeEntryPath(entry.name))
                         if (!outFile.exists()) {
@@ -460,10 +465,16 @@ object ComicParser {
                                     var read: Int
                                     while (input.read(buffer).also { read = it } != -1) {
                                         output.write(buffer, 0, read)
+                                        runningTotalBytes += read
+                                        if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                                            break
+                                        }
                                     }
                                     output.flush()
                                 }
                             }
+                        } else {
+                            runningTotalBytes += outFile.length()
                         }
                         onEntryExtracted?.invoke(outFile)
                     } catch (e: Exception) {
@@ -582,10 +593,15 @@ object ComicParser {
 
     private fun extractRar(rarFile: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
+        var runningTotalBytes = 0L
         try {
             Archive(rarFile).use { archive ->
                 var header = archive.nextFileHeader()
                 while (header != null) {
+                    if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                        Log.w(TAG, "Aborting RAR extraction: total size limit exceeded")
+                        break
+                    }
                     try {
                         if (!header.isDirectory) {
                             if (header.isEncrypted) {
@@ -606,6 +622,7 @@ object ComicParser {
                                         archive.extractFile(header, out)
                                         out.flush()
                                     }
+                                    runningTotalBytes += outFile.length()
                                     onEntryExtracted?.invoke(outFile)
                                 }
                             }

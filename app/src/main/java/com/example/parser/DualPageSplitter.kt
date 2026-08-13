@@ -9,9 +9,11 @@ import android.os.Build
 import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 
 object DualPageSplitter {
     private const val TAG = "DualPageSplitter"
+    private const val MAX_SPLIT_CACHE_BYTES = 300L * 1024L * 1024L // 300MB
 
     fun processPages(
         context: Context,
@@ -26,6 +28,8 @@ object DualPageSplitter {
         val cacheDir = File(context.cacheDir, "split_pages")
         if (!cacheDir.exists()) {
             cacheDir.mkdirs()
+        } else {
+            cleanSplitCacheIfNeeded(cacheDir)
         }
 
         val resultList = mutableListOf<File>()
@@ -46,7 +50,7 @@ object DualPageSplitter {
                 resultList.add(file)
             } else {
                 // Wide spread page candidate for split
-                val fileHash = file.nameWithoutExtension.hashCode()
+                val fileHash = md5(file.absolutePath)
                 val part1File = File(cacheDir, "${fileHash}_left.jpg")
                 val part2File = File(cacheDir, "${fileHash}_right.jpg")
 
@@ -77,6 +81,36 @@ object DualPageSplitter {
         }
 
         return resultList
+    }
+
+    private fun md5(input: String): String {
+        return try {
+            val md = MessageDigest.getInstance("MD5")
+            val digest = md.digest(input.toByteArray())
+            digest.joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            input.hashCode().toString()
+        }
+    }
+
+    private fun cleanSplitCacheIfNeeded(cacheDir: File) {
+        try {
+            val files = cacheDir.listFiles() ?: return
+            val totalSize = files.sumOf { it.length() }
+            if (totalSize > MAX_SPLIT_CACHE_BYTES) {
+                val sorted = files.sortedBy { it.lastModified() }
+                var currentSize = totalSize
+                for (f in sorted) {
+                    val len = f.length()
+                    if (f.delete()) {
+                        currentSize -= len
+                    }
+                    if (currentSize <= MAX_SPLIT_CACHE_BYTES / 2) break
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed cleaning split cache: ${e.message}")
+        }
     }
 
     private fun splitAndSave(
