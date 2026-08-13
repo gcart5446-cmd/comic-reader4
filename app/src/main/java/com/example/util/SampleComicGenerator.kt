@@ -23,18 +23,6 @@ object SampleComicGenerator {
 
         context.getExternalFilesDir("comics")?.let { targetDirs.add(it) }
 
-        val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        if (downloads != null) {
-            if (!downloads.exists()) downloads.mkdirs()
-            targetDirs.add(downloads)
-        }
-
-        val documents = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-        if (documents != null) {
-            if (!documents.exists()) documents.mkdirs()
-            targetDirs.add(documents)
-        }
-
         val internalDir = File(context.filesDir, "sample_comics")
         if (!internalDir.exists()) internalDir.mkdirs()
         targetDirs.add(internalDir)

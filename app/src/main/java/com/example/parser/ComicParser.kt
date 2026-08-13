@@ -41,6 +41,7 @@ data class ComicPagesResult(
 
 object ComicParser {
     private const val TAG = "ComicParser"
+    private const val MAX_TOTAL_EXTRACTED_BYTES = 2L * 1024 * 1024 * 1024 // 2GB max extraction limit
 
     val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "avif", "jxl")
     val ARCHIVE_EXTENSIONS = setOf("cbz", "cbr", "cb7", "cbt", "zip", "rar", "7z", "tar")
@@ -343,9 +344,12 @@ object ComicParser {
             if (!rawPath.isNullOrEmpty()) {
                 val directFile = File(rawPath)
                 if (directFile.exists() && directFile.canRead() && directFile.length() > 0) {
+                    Log.d(TAG, "prepareInputFile: using direct path resolution for $rawPath")
                     return directFile
                 }
             }
+
+            Log.d(TAG, "prepareInputFile: using ContentResolver stream copy for URI: $uri")
 
             // High-speed stream path with 256KB buffer
             try {
@@ -487,6 +491,7 @@ object ComicParser {
 
     private fun tryExtractZipStream(zipFile: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
+        var runningTotalBytes = 0L
         try {
             ZipInputStream(BufferedInputStream(FileInputStream(zipFile), 262144)).use { zipIn ->
                 var entry: ZipEntry? = null
@@ -511,17 +516,26 @@ object ComicParser {
                             val needsSniffing = ext.isEmpty() || (ext !in IMAGE_EXTENSIONS && ext !in ARCHIVE_EXTENSIONS && ext !in NON_MEDIA_EXTENSIONS)
 
                             if (needsSniffing) {
-                                val outStream = java.io.ByteArrayOutputStream()
-                                var read: Int
-                                while (zipIn.read(buffer).also { read = it } != -1) {
-                                    outStream.write(buffer, 0, read)
+                                val pushback = java.io.PushbackInputStream(zipIn, 16)
+                                val sample = pushback.readSampleBytes(16)
+                                if (sample.isNotEmpty()) {
+                                    pushback.unread(sample)
                                 }
-                                val entryBytes = outStream.toByteArray()
-                                val sample = entryBytes.copyOf(minOf(16, entryBytes.size))
                                 if (isSupportedMediaEntry(entryName, sample)) {
                                     val outFile = File(destDir, sanitizeEntryPath(entryName))
                                     outFile.parentFile?.mkdirs()
-                                    outFile.writeBytes(entryBytes)
+                                    BufferedOutputStream(FileOutputStream(outFile), 262144).use { out ->
+                                        var read: Int
+                                        while (pushback.read(buffer).also { read = it } != -1) {
+                                            out.write(buffer, 0, read)
+                                            runningTotalBytes += read
+                                            if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                                                Log.w(TAG, "Aborting ZIP extraction: total size limit exceeded")
+                                                break
+                                            }
+                                        }
+                                        out.flush()
+                                    }
                                     onEntryExtracted?.invoke(outFile)
                                 }
                             } else {
@@ -532,6 +546,11 @@ object ComicParser {
                                         var read: Int
                                         while (zipIn.read(buffer).also { read = it } != -1) {
                                             out.write(buffer, 0, read)
+                                            runningTotalBytes += read
+                                            if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                                                Log.w(TAG, "Aborting ZIP extraction: total size limit exceeded")
+                                                break
+                                            }
                                         }
                                         out.flush()
                                     }
@@ -548,6 +567,7 @@ object ComicParser {
                     } finally {
                         try { zipIn.closeEntry() } catch (_: Throwable) {}
                     }
+                    if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) break
                 }
             }
         } catch (e: Throwable) {
@@ -612,6 +632,7 @@ object ComicParser {
 
     private fun extract7z(file7z: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
+        var runningTotalBytes = 0L
         try {
             SevenZFile.Builder().setFile(file7z).get().use { sevenZFile ->
                 var entry = sevenZFile.nextEntry
@@ -624,18 +645,38 @@ object ComicParser {
                                 val ext = entryName.substringAfterLast('.', "").lowercase(Locale.ROOT)
                                 val needsSniffing = ext.isEmpty() || (ext !in IMAGE_EXTENSIONS && ext !in ARCHIVE_EXTENSIONS && ext !in NON_MEDIA_EXTENSIONS)
 
-                                if (needsSniffing) {
-                                    val outStream = java.io.ByteArrayOutputStream()
-                                    var bytesRead: Int
-                                    while (sevenZFile.read(buffer).also { bytesRead = it } != -1) {
-                                        outStream.write(buffer, 0, bytesRead)
+                                val sevenZStream = object : java.io.InputStream() {
+                                    override fun read(): Int {
+                                        val b = ByteArray(1)
+                                        val r = sevenZFile.read(b, 0, 1)
+                                        return if (r > 0) b[0].toInt() and 0xFF else -1
                                     }
-                                    val entryBytes = outStream.toByteArray()
-                                    val sample = entryBytes.copyOf(minOf(16, entryBytes.size))
+                                    override fun read(b: ByteArray, off: Int, len: Int): Int {
+                                        return sevenZFile.read(b, off, len)
+                                    }
+                                }
+
+                                if (needsSniffing) {
+                                    val pushback = java.io.PushbackInputStream(sevenZStream, 16)
+                                    val sample = pushback.readSampleBytes(16)
+                                    if (sample.isNotEmpty()) {
+                                        pushback.unread(sample)
+                                    }
                                     if (isSupportedMediaEntry(entryName, sample)) {
                                         val outFile = File(destDir, sanitizeEntryPath(entryName))
                                         outFile.parentFile?.mkdirs()
-                                        outFile.writeBytes(entryBytes)
+                                        BufferedOutputStream(FileOutputStream(outFile), 262144).use { out ->
+                                            var bytesRead: Int
+                                            while (pushback.read(buffer).also { bytesRead = it } != -1) {
+                                                out.write(buffer, 0, bytesRead)
+                                                runningTotalBytes += bytesRead
+                                                if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                                                    Log.w(TAG, "Aborting 7z extraction: total size limit exceeded")
+                                                    break
+                                                }
+                                            }
+                                            out.flush()
+                                        }
                                         onEntryExtracted?.invoke(outFile)
                                     }
                                 } else {
@@ -646,6 +687,11 @@ object ComicParser {
                                             var bytesRead: Int
                                             while (sevenZFile.read(buffer).also { bytesRead = it } != -1) {
                                                 out.write(buffer, 0, bytesRead)
+                                                runningTotalBytes += bytesRead
+                                                if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                                                    Log.w(TAG, "Aborting 7z extraction: total size limit exceeded")
+                                                    break
+                                                }
                                             }
                                             out.flush()
                                         }
@@ -661,6 +707,7 @@ object ComicParser {
                         }
                         Log.w(TAG, "Error extracting 7Z entry ${entry?.name}: ${e.message}")
                     }
+                    if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) break
                     entry = sevenZFile.nextEntry
                 }
             }
@@ -675,7 +722,8 @@ object ComicParser {
     }
 
     private fun extractTarFile(tarFile: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
-        var isEncrypted = false
+        // TAR archives do not support native encryption, so this always returns false.
+        var runningTotalBytes = 0L
         try {
             TarArchiveInputStream(BufferedInputStream(FileInputStream(tarFile))).use { tarIn ->
                 var entry = tarIn.nextEntry
@@ -689,17 +737,26 @@ object ComicParser {
                                 val needsSniffing = ext.isEmpty() || (ext !in IMAGE_EXTENSIONS && ext !in ARCHIVE_EXTENSIONS && ext !in NON_MEDIA_EXTENSIONS)
 
                                 if (needsSniffing) {
-                                    val outStream = java.io.ByteArrayOutputStream()
-                                    var read: Int
-                                    while (tarIn.read(buffer).also { read = it } != -1) {
-                                        outStream.write(buffer, 0, read)
+                                    val pushback = java.io.PushbackInputStream(tarIn, 16)
+                                    val sample = pushback.readSampleBytes(16)
+                                    if (sample.isNotEmpty()) {
+                                        pushback.unread(sample)
                                     }
-                                    val entryBytes = outStream.toByteArray()
-                                    val sample = entryBytes.copyOf(minOf(16, entryBytes.size))
                                     if (isSupportedMediaEntry(entryName, sample)) {
                                         val outFile = File(destDir, sanitizeEntryPath(entryName))
                                         outFile.parentFile?.mkdirs()
-                                        outFile.writeBytes(entryBytes)
+                                        BufferedOutputStream(FileOutputStream(outFile), 65536).use { out ->
+                                            var read: Int
+                                            while (pushback.read(buffer).also { read = it } != -1) {
+                                                out.write(buffer, 0, read)
+                                                runningTotalBytes += read
+                                                if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                                                    Log.w(TAG, "Aborting TAR extraction: total size limit exceeded")
+                                                    break
+                                                }
+                                            }
+                                            out.flush()
+                                        }
                                         onEntryExtracted?.invoke(outFile)
                                     }
                                 } else {
@@ -710,6 +767,11 @@ object ComicParser {
                                             var read: Int
                                             while (tarIn.read(buffer).also { read = it } != -1) {
                                                 out.write(buffer, 0, read)
+                                                runningTotalBytes += read
+                                                if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) {
+                                                    Log.w(TAG, "Aborting TAR extraction: total size limit exceeded")
+                                                    break
+                                                }
                                             }
                                             out.flush()
                                         }
@@ -721,13 +783,14 @@ object ComicParser {
                     } catch (e: Exception) {
                         Log.w(TAG, "Error extracting TAR entry ${entry?.name}: ${e.message}")
                     }
+                    if (runningTotalBytes > MAX_TOTAL_EXTRACTED_BYTES) break
                     entry = tarIn.nextEntry
                 }
             }
         } catch (e: Throwable) {
             Log.e(TAG, "Tar extract failed: ${e.message}", e)
         }
-        return isEncrypted
+        return false
     }
 
     private fun extractPdfPages(pdfFile: File, destDir: File) {
