@@ -20,6 +20,14 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 
+import android.content.Context
+import android.content.Intent
+import android.os.Environment
+import android.provider.MediaStore
+import android.content.ContentValues
+import android.util.Log
+import androidx.core.content.FileProvider
+
 data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
 
 data class ReaderSettingsState(
@@ -30,7 +38,12 @@ data class ReaderSettingsState(
     val backgroundColor: Long = 0xFF000000,
     val brightness: Float = 1.0f,
     val isControlsVisible: Boolean = true,
-    val colorFilter: String = "DEFAULT"
+    val colorFilter: String = "DEFAULT",
+    val tapZoneMode: String = "STANDARD",
+    val volumeKeysEnabled: Boolean = true,
+    val volumeKeysInverted: Boolean = false,
+    val orientationLock: String = "DEFAULT",
+    val dualPageSplit: Boolean = false
 )
 
 data class ReaderUiState(
@@ -51,7 +64,12 @@ data class ReaderUiState(
     val bookmarks: List<BookmarkEntity> = emptyList(),
     val isLoading: Boolean = true,
     val errorMessage: String? = null,
-    val colorFilter: String = "DEFAULT"
+    val colorFilter: String = "DEFAULT",
+    val tapZoneMode: String = "STANDARD",
+    val volumeKeysEnabled: Boolean = true,
+    val volumeKeysInverted: Boolean = false,
+    val orientationLock: String = "DEFAULT",
+    val dualPageSplit: Boolean = false
 )
 
 class ReaderViewModel(
@@ -73,6 +91,12 @@ class ReaderViewModel(
     private val _errorMessage = MutableStateFlow<String?>(null)
     private val _parsedResult = MutableStateFlow<ComicPagesResult?>(null)
 
+    private val _tapZoneMode = MutableStateFlow("STANDARD")
+    private val _volumeKeysEnabled = MutableStateFlow(true)
+    private val _volumeKeysInverted = MutableStateFlow(false)
+    private val _orientationLock = MutableStateFlow("DEFAULT")
+    private val _dualPageSplit = MutableStateFlow(false)
+
     val comicEntity: StateFlow<ComicEntity?> = repository.getComicByUri(comicUri)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), null)
 
@@ -87,7 +111,11 @@ class ReaderViewModel(
         Quadruple(bg, bright, controls, filter)
     }
 
-    private val _readerSettings = combine(_readerDisplayState, _readerAtmosphereState) { display, atmosphere ->
+    private val _readerBehaviorState = combine(_tapZoneMode, _volumeKeysEnabled, _volumeKeysInverted, _orientationLock) { tap, vol, inv, orient ->
+        Quadruple(tap, vol, inv, orient)
+    }
+
+    private val _readerSettings = combine(_readerDisplayState, _readerAtmosphereState, _readerBehaviorState, _dualPageSplit) { display, atmosphere, behavior, dual ->
         ReaderSettingsState(
             readingDirection = display.first,
             scaleType = display.second,
@@ -96,7 +124,12 @@ class ReaderViewModel(
             backgroundColor = atmosphere.first,
             brightness = atmosphere.second,
             isControlsVisible = atmosphere.third,
-            colorFilter = atmosphere.fourth
+            colorFilter = atmosphere.fourth,
+            tapZoneMode = behavior.first,
+            volumeKeysEnabled = behavior.second,
+            volumeKeysInverted = behavior.third,
+            orientationLock = behavior.fourth,
+            dualPageSplit = dual
         )
     }
 
@@ -120,12 +153,14 @@ class ReaderViewModel(
         val loading = core.third
         val errorMsg = core.fourth
 
+        val rawPages = parsed?.pageFiles ?: emptyList()
+
         ReaderUiState(
             comicUri = comicUri,
             title = entity?.title ?: parsed?.title ?: "Comic",
             format = entity?.fileFormat ?: parsed?.format ?: "CBZ",
-            pages = parsed?.pageFiles ?: emptyList(),
-            totalPages = parsed?.pageFiles?.size ?: entity?.totalPages ?: 0,
+            pages = rawPages,
+            totalPages = rawPages.size.coerceAtLeast(entity?.totalPages ?: 0),
             currentPageIndex = pageIdx,
             readingDirection = settings.readingDirection,
             scaleType = settings.scaleType,
@@ -138,7 +173,12 @@ class ReaderViewModel(
             bookmarks = bmarks,
             isLoading = loading,
             errorMessage = errorMsg,
-            colorFilter = settings.colorFilter
+            colorFilter = settings.colorFilter,
+            tapZoneMode = settings.tapZoneMode,
+            volumeKeysEnabled = settings.volumeKeysEnabled,
+            volumeKeysInverted = settings.volumeKeysInverted,
+            orientationLock = settings.orientationLock,
+            dualPageSplit = settings.dualPageSplit
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ReaderUiState())
 
@@ -262,6 +302,86 @@ class ReaderViewModel(
 
     fun setColorFilter(filter: String) {
         _colorFilter.value = filter
+    }
+
+    fun setTapZoneMode(mode: String) {
+        _tapZoneMode.value = mode
+    }
+
+    fun setVolumeKeysEnabled(enabled: Boolean) {
+        _volumeKeysEnabled.value = enabled
+    }
+
+    fun setVolumeKeysInverted(inverted: Boolean) {
+        _volumeKeysInverted.value = inverted
+    }
+
+    fun setOrientationLock(lock: String) {
+        _orientationLock.value = lock
+    }
+
+    fun setDualPageSplit(enabled: Boolean) {
+        _dualPageSplit.value = enabled
+    }
+
+    fun getShareIntentForPage(context: Context, pageIndex: Int): Intent? {
+        val pages = uiState.value.pages
+        if (pageIndex !in pages.indices) return null
+        val pageFile = pages[pageIndex]
+        if (!pageFile.exists()) return null
+
+        val authority = "${context.packageName}.fileprovider"
+        val uri = FileProvider.getUriForFile(context, authority, pageFile)
+        return Intent(Intent.ACTION_SEND).apply {
+            type = "image/*"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+    }
+
+    fun savePageToPictures(context: Context, pageIndex: Int, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val pages = uiState.value.pages
+                if (pageIndex !in pages.indices) {
+                    onResult(false, "Invalid page index")
+                    return@launch
+                }
+                val pageFile = pages[pageIndex]
+                if (!pageFile.exists()) {
+                    onResult(false, "Page file not found")
+                    return@launch
+                }
+
+                val filename = "Comic_${System.currentTimeMillis()}_page_${pageIndex + 1}.jpg"
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, filename)
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ComicReader")
+                    }
+                    val resolver = context.contentResolver
+                    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    if (uri != null) {
+                        resolver.openOutputStream(uri)?.use { out ->
+                            pageFile.inputStream().use { input -> input.copyTo(out) }
+                        }
+                        onResult(true, "Saved to Pictures/ComicReader")
+                    } else {
+                        onResult(false, "Failed to create MediaStore record")
+                    }
+                } else {
+                    val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                    val targetFolder = File(picturesDir, "ComicReader")
+                    if (!targetFolder.exists()) targetFolder.mkdirs()
+                    val targetFile = File(targetFolder, filename)
+                    pageFile.copyTo(targetFile, overwrite = true)
+                    onResult(true, "Saved to ${targetFile.absolutePath}")
+                }
+            } catch (e: Exception) {
+                onResult(false, "Error saving page: ${e.message}")
+            }
+        }
     }
 
     fun toggleFavorite() {

@@ -16,6 +16,27 @@ import com.example.ui.MainScreen
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
+    companion object {
+        var onVolumeKeyListener: ((isVolumeUp: Boolean) -> Boolean)? = null
+    }
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+            val listener = onVolumeKeyListener
+            if (listener != null) {
+                when (event.keyCode) {
+                    android.view.KeyEvent.KEYCODE_VOLUME_UP -> {
+                        if (listener.invoke(true)) return true
+                    }
+                    android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                        if (listener.invoke(false)) return true
+                    }
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()

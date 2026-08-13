@@ -1,6 +1,7 @@
 package com.example.ui.reader
 
 import android.app.Activity
+import android.content.Intent
 import android.view.WindowManager
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -107,6 +108,12 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import java.io.File
 
+import android.widget.Toast
+import androidx.compose.material.icons.filled.FileDownload
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ComicReaderScreen(
@@ -123,6 +130,18 @@ fun ComicReaderScreen(
     var bookmarkTitleInput by remember { mutableStateOf("") }
 
     val activityContext = LocalContext.current
+
+    // Screen Orientation Lock Effect
+    LaunchedEffect(uiState.orientationLock) {
+        val activity = activityContext as? Activity ?: return@LaunchedEffect
+        activity.requestedOrientation = when (uiState.orientationLock) {
+            "PORTRAIT" -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            "LANDSCAPE" -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            "FREE" -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR
+            else -> android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
     DisposableEffect(uiState.isControlsVisible) {
         val window = (activityContext as? Activity)?.window
         if (window != null) {
@@ -146,6 +165,7 @@ fun ComicReaderScreen(
         window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
             window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            (activityContext as? Activity)?.requestedOrientation = android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
@@ -268,28 +288,74 @@ fun ComicReaderScreen(
             }
     }
 
+    // Volume Key Navigation Listener
+    DisposableEffect(uiState.volumeKeysEnabled, uiState.volumeKeysInverted, uiState.currentPageIndex, pageCount) {
+        if (uiState.volumeKeysEnabled) {
+            com.example.MainActivity.onVolumeKeyListener = { isVolumeUp ->
+                val isNext = if (uiState.volumeKeysInverted) isVolumeUp else !isVolumeUp
+                if (isNext) {
+                    if (uiState.currentPageIndex < pageCount - 1) {
+                        val target = uiState.currentPageIndex + 1
+                        viewModel.onPageChanged(target)
+                        scope.launch {
+                            if (uiState.scrollMode == "PAGER") pagerState.animateScrollToPage(target)
+                            else webtoonListState.animateScrollToItem(target)
+                        }
+                    }
+                } else {
+                    if (uiState.currentPageIndex > 0) {
+                        val target = uiState.currentPageIndex - 1
+                        viewModel.onPageChanged(target)
+                        scope.launch {
+                            if (uiState.scrollMode == "PAGER") pagerState.animateScrollToPage(target)
+                            else webtoonListState.animateScrollToItem(target)
+                        }
+                    }
+                }
+                true
+            }
+        } else {
+            com.example.MainActivity.onVolumeKeyListener = null
+        }
+        onDispose {
+            com.example.MainActivity.onVolumeKeyListener = null
+        }
+    }
+
     val bgColor = Color(uiState.backgroundColor)
 
     val handlePageTap: (Offset, IntSize, Float) -> Unit = remember(
         uiState.isControlsVisible,
         uiState.scrollMode,
         uiState.readingDirection,
+        uiState.tapZoneMode,
         uiState.currentPageIndex,
         pageCount
     ) {
         { offset, containerSize, currentScale ->
             if (uiState.isControlsVisible) {
-                // When controls are visible, tapping ANYWHERE on the image dismisses controls
                 viewModel.toggleControls()
             } else if (currentScale > 1.2f) {
+                viewModel.toggleControls()
+            } else if (uiState.tapZoneMode == "DISABLED") {
                 viewModel.toggleControls()
             } else {
                 val width = containerSize.width.toFloat()
                 val height = containerSize.height.toFloat()
+                val isRtl = uiState.readingDirection == "RTL"
 
                 if (uiState.scrollMode == "WEBTOON") {
-                    val topThreshold = height * 0.25f
-                    val bottomThreshold = height * 0.75f
+                    val topThreshold = when (uiState.tapZoneMode) {
+                        "EDGE" -> height * 0.18f
+                        "KINDLISH" -> height * 0.20f
+                        else -> height * 0.25f
+                    }
+                    val bottomThreshold = when (uiState.tapZoneMode) {
+                        "EDGE" -> height * 0.82f
+                        "KINDLISH" -> height * 0.20f
+                        else -> height * 0.75f
+                    }
+
                     when {
                         offset.y < topThreshold -> {
                             val prev = (uiState.currentPageIndex - 1).coerceAtLeast(0)
@@ -299,30 +365,62 @@ fun ComicReaderScreen(
                             val next = (uiState.currentPageIndex + 1).coerceAtMost(pageCount - 1)
                             scope.launch { webtoonListState.animateScrollToItem(next) }
                         }
-                        else -> {
-                            viewModel.toggleControls()
-                        }
+                        else -> viewModel.toggleControls()
                     }
-                } else { // PAGER
-                    val leftThreshold = width * 0.35f
-                    val rightThreshold = width * 0.65f
-                    val isRtl = uiState.readingDirection == "RTL"
-
-                    when {
-                        offset.x < leftThreshold -> {
-                            val target = if (isRtl) uiState.currentPageIndex + 1 else uiState.currentPageIndex - 1
-                            if (target in 0 until pageCount) {
-                                scope.launch { pagerState.animateScrollToPage(target) }
+                } else { // PAGER Mode
+                    when (uiState.tapZoneMode) {
+                        "EDGE" -> {
+                            val leftThreshold = width * 0.20f
+                            val rightThreshold = width * 0.80f
+                            when {
+                                offset.x < leftThreshold -> {
+                                    val target = if (isRtl) uiState.currentPageIndex + 1 else uiState.currentPageIndex - 1
+                                    if (target in 0 until pageCount) {
+                                        scope.launch { pagerState.animateScrollToPage(target) }
+                                    }
+                                }
+                                offset.x > rightThreshold -> {
+                                    val target = if (isRtl) uiState.currentPageIndex - 1 else uiState.currentPageIndex + 1
+                                    if (target in 0 until pageCount) {
+                                        scope.launch { pagerState.animateScrollToPage(target) }
+                                    }
+                                }
+                                else -> viewModel.toggleControls()
                             }
                         }
-                        offset.x > rightThreshold -> {
-                            val target = if (isRtl) uiState.currentPageIndex - 1 else uiState.currentPageIndex + 1
-                            if (target in 0 until pageCount) {
-                                scope.launch { pagerState.animateScrollToPage(target) }
+                        "KINDLISH" -> {
+                            val prevThresholdX = width * 0.25f
+                            val prevThresholdY = height * 0.25f
+                            if (offset.x < prevThresholdX || offset.y < prevThresholdY) {
+                                val target = if (isRtl) uiState.currentPageIndex + 1 else uiState.currentPageIndex - 1
+                                if (target in 0 until pageCount) {
+                                    scope.launch { pagerState.animateScrollToPage(target) }
+                                }
+                            } else {
+                                val target = if (isRtl) uiState.currentPageIndex - 1 else uiState.currentPageIndex + 1
+                                if (target in 0 until pageCount) {
+                                    scope.launch { pagerState.animateScrollToPage(target) }
+                                }
                             }
                         }
-                        else -> {
-                            viewModel.toggleControls()
+                        else -> { // STANDARD
+                            val leftThreshold = width * 0.35f
+                            val rightThreshold = width * 0.65f
+                            when {
+                                offset.x < leftThreshold -> {
+                                    val target = if (isRtl) uiState.currentPageIndex + 1 else uiState.currentPageIndex - 1
+                                    if (target in 0 until pageCount) {
+                                        scope.launch { pagerState.animateScrollToPage(target) }
+                                    }
+                                }
+                                offset.x > rightThreshold -> {
+                                    val target = if (isRtl) uiState.currentPageIndex - 1 else uiState.currentPageIndex + 1
+                                    if (target in 0 until pageCount) {
+                                        scope.launch { pagerState.animateScrollToPage(target) }
+                                    }
+                                }
+                                else -> viewModel.toggleControls()
+                            }
                         }
                     }
                 }
@@ -452,6 +550,25 @@ fun ComicReaderScreen(
                             }
                         },
                         actions = {
+                            IconButton(onClick = {
+                                val intent = viewModel.getShareIntentForPage(activityContext, uiState.currentPageIndex)
+                                if (intent != null) {
+                                    activityContext.startActivity(Intent.createChooser(intent, "Share Page"))
+                                } else {
+                                    Toast.makeText(activityContext, "Failed to prepare page share", Toast.LENGTH_SHORT).show()
+                                }
+                            }) {
+                                Icon(Icons.Default.Share, contentDescription = "Share Page", tint = Color.White)
+                            }
+                            IconButton(onClick = {
+                                viewModel.savePageToPictures(activityContext, uiState.currentPageIndex) { success, msg ->
+                                    (activityContext as? Activity)?.runOnUiThread {
+                                        Toast.makeText(activityContext, msg, Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }) {
+                                Icon(Icons.Default.FileDownload, contentDescription = "Save Page", tint = Color.White)
+                            }
                             IconButton(onClick = { viewModel.toggleFavorite() }) {
                                 Icon(
                                     if (uiState.isFavorite) Icons.Default.Star else Icons.Outlined.StarOutline,
@@ -673,6 +790,7 @@ fun ComicReaderScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(20.dp)
             ) {
                 Text(
@@ -681,6 +799,88 @@ fun ComicReaderScreen(
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
+
+                // Navigation Tap Zones
+                Text("Tap Zone Navigation Mode", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(vertical = 8.dp)
+                ) {
+                    FilterChip(
+                        selected = uiState.tapZoneMode == "STANDARD",
+                        onClick = { viewModel.setTapZoneMode("STANDARD") },
+                        label = { Text("Standard") }
+                    )
+                    FilterChip(
+                        selected = uiState.tapZoneMode == "EDGE",
+                        onClick = { viewModel.setTapZoneMode("EDGE") },
+                        label = { Text("Edge Only") }
+                    )
+                    FilterChip(
+                        selected = uiState.tapZoneMode == "KINDLISH",
+                        onClick = { viewModel.setTapZoneMode("KINDLISH") },
+                        label = { Text("Kindlish") }
+                    )
+                    FilterChip(
+                        selected = uiState.tapZoneMode == "DISABLED",
+                        onClick = { viewModel.setTapZoneMode("DISABLED") },
+                        label = { Text("Disabled") }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Volume Key Navigation
+                Text("Volume Keys Page Turning", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(vertical = 8.dp)
+                ) {
+                    FilterChip(
+                        selected = uiState.volumeKeysEnabled,
+                        onClick = { viewModel.setVolumeKeysEnabled(!uiState.volumeKeysEnabled) },
+                        label = { Text(if (uiState.volumeKeysEnabled) "Keys: Enabled" else "Keys: Disabled") }
+                    )
+                    if (uiState.volumeKeysEnabled) {
+                        FilterChip(
+                            selected = uiState.volumeKeysInverted,
+                            onClick = { viewModel.setVolumeKeysInverted(!uiState.volumeKeysInverted) },
+                            label = { Text(if (uiState.volumeKeysInverted) "Inverted" else "Normal Direction") }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Screen Orientation Lock
+                Text("Screen Orientation Lock", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(vertical = 8.dp)
+                ) {
+                    FilterChip(
+                        selected = uiState.orientationLock == "DEFAULT",
+                        onClick = { viewModel.setOrientationLock("DEFAULT") },
+                        label = { Text("System Default") }
+                    )
+                    FilterChip(
+                        selected = uiState.orientationLock == "FREE",
+                        onClick = { viewModel.setOrientationLock("FREE") },
+                        label = { Text("Sensor Auto-rotate") }
+                    )
+                    FilterChip(
+                        selected = uiState.orientationLock == "PORTRAIT",
+                        onClick = { viewModel.setOrientationLock("PORTRAIT") },
+                        label = { Text("Portrait") }
+                    )
+                    FilterChip(
+                        selected = uiState.orientationLock == "LANDSCAPE",
+                        onClick = { viewModel.setOrientationLock("LANDSCAPE") },
+                        label = { Text("Landscape") }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
 
                 // Reading Direction
                 Text("Reading Direction", style = MaterialTheme.typography.titleSmall)
@@ -697,6 +897,26 @@ fun ComicReaderScreen(
                         selected = uiState.readingDirection == "RTL",
                         onClick = { viewModel.setReadingDirection("RTL") },
                         label = { Text("RTL (Manga)") }
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Dual Page Spread Split
+                Text("Dual Page Spreads", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(vertical = 8.dp)
+                ) {
+                    FilterChip(
+                        selected = !uiState.dualPageSplit,
+                        onClick = { viewModel.setDualPageSplit(false) },
+                        label = { Text("Single Page") }
+                    )
+                    FilterChip(
+                        selected = uiState.dualPageSplit,
+                        onClick = { viewModel.setDualPageSplit(true) },
+                        label = { Text("Split Dual Spreads") }
                     )
                 }
 
@@ -745,7 +965,6 @@ fun ComicReaderScreen(
                     )
                 }
 
-
                 Spacer(modifier = Modifier.height(12.dp))
 
                 // Color Filter Options
@@ -762,12 +981,17 @@ fun ComicReaderScreen(
                     FilterChip(
                         selected = uiState.colorFilter == "INVERT",
                         onClick = { viewModel.setColorFilter("INVERT") },
-                        label = { Text("Invert (Night Mode)") }
+                        label = { Text("Invert") }
                     )
                     FilterChip(
                         selected = uiState.colorFilter == "GRAYSCALE",
                         onClick = { viewModel.setColorFilter("GRAYSCALE") },
                         label = { Text("Grayscale") }
+                    )
+                    FilterChip(
+                        selected = uiState.colorFilter == "SEPIA",
+                        onClick = { viewModel.setColorFilter("SEPIA") },
+                        label = { Text("Sepia") }
                     )
                 }
 
@@ -959,6 +1183,16 @@ fun ZoomablePageImage(
             )
             "GRAYSCALE" -> ColorFilter.colorMatrix(
                 ColorMatrix().apply { setToSaturation(0f) }
+            )
+            "SEPIA" -> ColorFilter.colorMatrix(
+                ColorMatrix(
+                    floatArrayOf(
+                        0.393f, 0.769f, 0.189f, 0f, 0f,
+                        0.349f, 0.686f, 0.168f, 0f, 0f,
+                        0.272f, 0.534f, 0.131f, 0f, 0f,
+                        0f,     0f,     0f,     1f, 0f
+                    )
+                )
             )
             else -> null
         }
