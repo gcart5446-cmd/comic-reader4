@@ -17,5 +17,13 @@ data class ComicEntity(
     val scaleType: String = "FIT_SCREEN",  // "FIT_SCREEN", "FIT_WIDTH", "FIT_HEIGHT"
     val scrollMode: String = "PAGER",      // "PAGER", "WEBTOON"
     val fileSize: Long = 0L,
-    val parentArchiveUri: String? = null
+    val parentArchiveUri: String? = null,
+    val tapZoneMode: String = "STANDARD",
+    val volumeKeysEnabled: Boolean = true,
+    val volumeKeysInverted: Boolean = false,
+    val orientationLock: String = "DEFAULT",
+    val dualPageSplit: Boolean = false,
+    val colorFilter: String = "DEFAULT",
+    val backgroundColor: Long = 0xFF000000,
+    val brightness: Float = 1.0f
 )

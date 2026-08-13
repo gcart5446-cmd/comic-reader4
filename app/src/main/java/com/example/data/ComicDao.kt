@@ -32,8 +32,24 @@ interface ComicDao {
     @Query("UPDATE comics SET isFavorite = :isFavorite WHERE uri = :uri")
     suspend fun setFavorite(uri: String, isFavorite: Boolean)
 
-    @Query("UPDATE comics SET readingDirection = :direction, scaleType = :scaleType, scrollMode = :scrollMode WHERE uri = :uri")
-    suspend fun updateReaderSettings(uri: String, direction: String, scaleType: String, scrollMode: String)
+    @Query("UPDATE comics SET readingDirection = :direction, scaleType = :scaleType, scrollMode = :scrollMode, tapZoneMode = :tapZoneMode, volumeKeysEnabled = :volumeKeysEnabled, volumeKeysInverted = :volumeKeysInverted, orientationLock = :orientationLock, dualPageSplit = :dualPageSplit, colorFilter = :colorFilter, backgroundColor = :backgroundColor, brightness = :brightness WHERE uri = :uri")
+    suspend fun updateReaderSettings(
+        uri: String,
+        direction: String,
+        scaleType: String,
+        scrollMode: String,
+        tapZoneMode: String,
+        volumeKeysEnabled: Boolean,
+        volumeKeysInverted: Boolean,
+        orientationLock: String,
+        dualPageSplit: Boolean,
+        colorFilter: String,
+        backgroundColor: Long,
+        brightness: Float
+    )
+
+    @Query("UPDATE comics SET coverUri = :coverUri WHERE uri = :uri")
+    suspend fun updateCover(uri: String, coverUri: String)
 
     @Query("DELETE FROM comics WHERE uri = :uri")
     suspend fun deleteComic(uri: String)

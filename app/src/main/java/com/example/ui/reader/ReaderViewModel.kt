@@ -9,8 +9,10 @@ import com.example.data.AppDatabase
 import com.example.data.BookmarkEntity
 import com.example.data.ComicEntity
 import com.example.parser.ComicPagesResult
+import com.example.parser.DualPageSplitter
 import com.example.repository.ComicRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -29,6 +31,7 @@ import android.util.Log
 import androidx.core.content.FileProvider
 
 data class Quadruple<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)
+data class Quintuple<A, B, C, D, E>(val first: A, val second: B, val third: C, val fourth: D, val fifth: E)
 
 data class ReaderSettingsState(
     val readingDirection: String = "LTR",
@@ -133,34 +136,37 @@ class ReaderViewModel(
         )
     }
 
-    private val _coreState = combine(
-        _parsedResult,
-        _currentPageIndex,
-        _isLoading,
-        _errorMessage
-    ) { parsed, pageIdx, loading, error ->
-        Quadruple(parsed, pageIdx, loading, error)
+    private val _processedPages: Flow<List<File>> = combine(_parsedResult, _dualPageSplit, _readingDirection) { parsed, dual, dir ->
+        val rawPages = parsed?.pageFiles ?: emptyList()
+        if (rawPages.isEmpty()) {
+            emptyList()
+        } else {
+            DualPageSplitter.processPages(
+                context = getApplication(),
+                rawFiles = rawPages,
+                isDualPageSplit = dual,
+                isRtl = (dir == "RTL")
+            )
+        }
     }
 
     val uiState: StateFlow<ReaderUiState> = combine(
-        _coreState,
+        _processedPages,
+        _currentPageIndex,
         _readerSettings,
-        comicEntity,
-        bookmarks
-    ) { core, settings, entity, bmarks ->
-        val parsed = core.first
-        val pageIdx = core.second
-        val loading = core.third
-        val errorMsg = core.fourth
-
-        val rawPages = parsed?.pageFiles ?: emptyList()
+        comicEntity
+    ) { pages, pageIdx, settings, entity ->
+        val parsed = _parsedResult.value
+        val loading = _isLoading.value
+        val errorMsg = _errorMessage.value
+        val bmarks = bookmarks.value
 
         ReaderUiState(
             comicUri = comicUri,
             title = entity?.title ?: parsed?.title ?: "Comic",
             format = entity?.fileFormat ?: parsed?.format ?: "CBZ",
-            pages = rawPages,
-            totalPages = rawPages.size.coerceAtLeast(entity?.totalPages ?: 0),
+            pages = pages,
+            totalPages = pages.size.coerceAtLeast(entity?.totalPages ?: 0),
             currentPageIndex = pageIdx,
             readingDirection = settings.readingDirection,
             scaleType = settings.scaleType,
@@ -217,6 +223,14 @@ class ReaderViewModel(
                             _readingDirection.value = entity?.readingDirection ?: "LTR"
                             _scaleType.value = entity?.scaleType ?: "FIT_SCREEN"
                             _scrollMode.value = entity?.scrollMode ?: "PAGER"
+                            _tapZoneMode.value = entity?.tapZoneMode ?: "STANDARD"
+                            _volumeKeysEnabled.value = entity?.volumeKeysEnabled ?: true
+                            _volumeKeysInverted.value = entity?.volumeKeysInverted ?: false
+                            _orientationLock.value = entity?.orientationLock ?: "DEFAULT"
+                            _dualPageSplit.value = entity?.dualPageSplit ?: false
+                            _colorFilter.value = entity?.colorFilter ?: "DEFAULT"
+                            _backgroundColor.value = entity?.backgroundColor ?: 0xFF000000
+                            _brightness.value = entity?.brightness ?: 1.0f
                             prefetchPages(validPage, result.pageFiles)
                         } else {
                             prefetchPages(_currentPageIndex.value, result.pageFiles)
@@ -294,34 +308,63 @@ class ReaderViewModel(
 
     fun setBackgroundColor(colorLong: Long) {
         _backgroundColor.value = colorLong
+        saveSettings()
     }
 
     fun setBrightness(value: Float) {
         _brightness.value = value.coerceIn(0.1f, 1.0f)
+        saveSettings()
     }
 
     fun setColorFilter(filter: String) {
         _colorFilter.value = filter
+        saveSettings()
     }
 
     fun setTapZoneMode(mode: String) {
         _tapZoneMode.value = mode
+        saveSettings()
     }
 
     fun setVolumeKeysEnabled(enabled: Boolean) {
         _volumeKeysEnabled.value = enabled
+        saveSettings()
     }
 
     fun setVolumeKeysInverted(inverted: Boolean) {
         _volumeKeysInverted.value = inverted
+        saveSettings()
     }
 
     fun setOrientationLock(lock: String) {
         _orientationLock.value = lock
+        saveSettings()
     }
 
     fun setDualPageSplit(enabled: Boolean) {
         _dualPageSplit.value = enabled
+        saveSettings()
+    }
+
+    fun setPageAsCover(pageIndex: Int, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val pages = uiState.value.pages
+                if (pageIndex in pages.indices) {
+                    val pageFile = pages[pageIndex]
+                    if (pageFile.exists()) {
+                        repository.setCover(comicUri, pageFile.absolutePath)
+                        onResult(true, "Set page ${pageIndex + 1} as comic cover")
+                    } else {
+                        onResult(false, "Page file not found")
+                    }
+                } else {
+                    onResult(false, "Invalid page index")
+                }
+            } catch (e: Exception) {
+                onResult(false, "Error setting cover: ${e.message}")
+            }
+        }
     }
 
     fun getShareIntentForPage(context: Context, pageIndex: Int): Intent? {
@@ -353,7 +396,8 @@ class ReaderViewModel(
                     return@launch
                 }
 
-                val filename = "Comic_${System.currentTimeMillis()}_page_${pageIndex + 1}.jpg"
+                val cleanTitle = uiState.value.title.replace("[^a-zA-Z0-9_-]".toRegex(), "_")
+                val filename = "${cleanTitle}_Page_${pageIndex + 1}_${System.currentTimeMillis()}.jpg"
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
                     val values = ContentValues().apply {
                         put(MediaStore.Images.Media.DISPLAY_NAME, filename)
@@ -414,7 +458,15 @@ class ReaderViewModel(
                 uri = comicUri,
                 direction = _readingDirection.value,
                 scaleType = _scaleType.value,
-                scrollMode = _scrollMode.value
+                scrollMode = _scrollMode.value,
+                tapZoneMode = _tapZoneMode.value,
+                volumeKeysEnabled = _volumeKeysEnabled.value,
+                volumeKeysInverted = _volumeKeysInverted.value,
+                orientationLock = _orientationLock.value,
+                dualPageSplit = _dualPageSplit.value,
+                colorFilter = _colorFilter.value,
+                backgroundColor = _backgroundColor.value,
+                brightness = _brightness.value
             )
         }
     }

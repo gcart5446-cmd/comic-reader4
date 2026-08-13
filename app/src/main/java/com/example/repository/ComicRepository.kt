@@ -42,7 +42,15 @@ class ComicRepository(private val context: Context) {
             readingDirection = existing?.readingDirection ?: "LTR",
             scaleType = existing?.scaleType ?: "FIT_SCREEN",
             scrollMode = existing?.scrollMode ?: "PAGER",
-            fileSize = existing?.fileSize ?: 0L
+            fileSize = existing?.fileSize ?: 0L,
+            tapZoneMode = existing?.tapZoneMode ?: "STANDARD",
+            volumeKeysEnabled = existing?.volumeKeysEnabled ?: true,
+            volumeKeysInverted = existing?.volumeKeysInverted ?: false,
+            orientationLock = existing?.orientationLock ?: "DEFAULT",
+            dualPageSplit = existing?.dualPageSplit ?: false,
+            colorFilter = existing?.colorFilter ?: "DEFAULT",
+            backgroundColor = existing?.backgroundColor ?: 0xFF000000,
+            brightness = existing?.brightness ?: 1.0f
         )
         comicDao.insertOrUpdate(entity)
 
@@ -61,9 +69,25 @@ class ComicRepository(private val context: Context) {
         uri: String,
         direction: String,
         scaleType: String,
-        scrollMode: String
+        scrollMode: String,
+        tapZoneMode: String,
+        volumeKeysEnabled: Boolean,
+        volumeKeysInverted: Boolean,
+        orientationLock: String,
+        dualPageSplit: Boolean,
+        colorFilter: String,
+        backgroundColor: Long,
+        brightness: Float
     ) {
-        comicDao.updateReaderSettings(uri, direction, scaleType, scrollMode)
+        comicDao.updateReaderSettings(
+            uri, direction, scaleType, scrollMode,
+            tapZoneMode, volumeKeysEnabled, volumeKeysInverted, orientationLock,
+            dualPageSplit, colorFilter, backgroundColor, brightness
+        )
+    }
+
+    suspend fun setCover(uri: String, coverUri: String) {
+        comicDao.updateCover(uri, coverUri)
     }
 
     suspend fun deleteComic(uri: String) {

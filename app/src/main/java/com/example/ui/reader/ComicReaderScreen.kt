@@ -62,6 +62,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -78,6 +79,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -128,6 +130,9 @@ fun ComicReaderScreen(
     var showBookmarkSheet by remember { mutableStateOf(false) }
     var showAddBookmarkDialog by remember { mutableStateOf(false) }
     var bookmarkTitleInput by remember { mutableStateOf("") }
+
+    var showPageActionsSheet by remember { mutableStateOf(false) }
+    var actionTargetPageIndex by remember { mutableIntStateOf(0) }
 
     val activityContext = LocalContext.current
 
@@ -457,6 +462,10 @@ fun ComicReaderScreen(
                             isCropMarginsEnabled = uiState.isCropMarginsEnabled,
                             colorFilterType = uiState.colorFilter,
                             onTap = handlePageTap,
+                            onLongPress = {
+                                actionTargetPageIndex = index
+                                showPageActionsSheet = true
+                            },
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -478,6 +487,10 @@ fun ComicReaderScreen(
                             isCropMarginsEnabled = uiState.isCropMarginsEnabled,
                             colorFilterType = uiState.colorFilter,
                             onTap = handlePageTap,
+                            onLongPress = {
+                                actionTargetPageIndex = page
+                                showPageActionsSheet = true
+                            },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -1147,6 +1160,76 @@ fun ComicReaderScreen(
             }
         )
     }
+
+    // PAGE LONG PRESS ACTIONS SHEET
+    if (showPageActionsSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showPageActionsSheet = false }
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp)
+            ) {
+                Text(
+                    text = "Page ${actionTargetPageIndex + 1} Actions",
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold)
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+
+                ListItem(
+                    headlineContent = { Text("Set Page as Comic Cover") },
+                    leadingContent = { Icon(Icons.Default.Palette, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showPageActionsSheet = false
+                        viewModel.setPageAsCover(actionTargetPageIndex) { success, msg ->
+                            (activityContext as? Activity)?.runOnUiThread {
+                                Toast.makeText(activityContext, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                )
+
+                ListItem(
+                    headlineContent = { Text("Save Page to Pictures") },
+                    leadingContent = { Icon(Icons.Default.FileDownload, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showPageActionsSheet = false
+                        viewModel.savePageToPictures(activityContext, actionTargetPageIndex) { success, msg ->
+                            (activityContext as? Activity)?.runOnUiThread {
+                                Toast.makeText(activityContext, msg, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                )
+
+                ListItem(
+                    headlineContent = { Text("Share Page Image") },
+                    leadingContent = { Icon(Icons.Default.Share, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showPageActionsSheet = false
+                        val intent = viewModel.getShareIntentForPage(activityContext, actionTargetPageIndex)
+                        if (intent != null) {
+                            activityContext.startActivity(Intent.createChooser(intent, "Share Page"))
+                        } else {
+                            Toast.makeText(activityContext, "Failed to prepare page share", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                )
+
+                ListItem(
+                    headlineContent = { Text("Bookmark Page") },
+                    leadingContent = { Icon(Icons.Default.Bookmark, contentDescription = null) },
+                    modifier = Modifier.clickable {
+                        showPageActionsSheet = false
+                        showAddBookmarkDialog = true
+                    }
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+            }
+        }
+    }
 }
 
 @Composable
@@ -1156,6 +1239,7 @@ fun ZoomablePageImage(
     isCropMarginsEnabled: Boolean = false,
     colorFilterType: String = "DEFAULT",
     onTap: (Offset, IntSize, Float) -> Unit = { _, _, _ -> },
+    onLongPress: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var scale by remember(pageFile) { mutableFloatStateOf(1f) }
@@ -1242,6 +1326,9 @@ fun ZoomablePageImage(
                         } else {
                             scale = 2.5f
                         }
+                    },
+                    onLongPress = {
+                        onLongPress()
                     },
                     onTap = { offset ->
                         onTap(offset, size, scale)
