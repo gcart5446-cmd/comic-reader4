@@ -138,28 +138,39 @@ class ReaderViewModel(
             _isLoading.value = true
             _errorMessage.value = null
             try {
-                val result = repository.loadComicPages(comicUri)
-                _parsedResult.value = result
-
                 val entity = AppDatabase.getDatabase(getApplication()).comicDao().getComicByUriSync(comicUri)
                 val savedPage = entity?.lastReadPage ?: 0
-                val total = result.pageFiles.size
-                if (total == 0) {
-                    _errorMessage.value = "No readable pages found in this comic file."
-                } else {
-                    val validPage = if (savedPage in 0 until total) savedPage else 0
-                    _currentPageIndex.value = validPage
-                    _readingDirection.value = entity?.readingDirection ?: "LTR"
-                    _scaleType.value = entity?.scaleType ?: "FIT_SCREEN"
-                    _scrollMode.value = entity?.scrollMode ?: "PAGER"
-                    
-                    prefetchPages(validPage, result.pageFiles)
+
+                repository.loadComicPagesFlow(comicUri, savedPage).collect { result ->
+                    _parsedResult.value = result
+
+                    if (result.isPasswordProtected) {
+                        _errorMessage.value = "This comic file is password-protected and cannot be opened."
+                        _isLoading.value = false
+                        return@collect
+                    }
+
+                    val total = result.pageFiles.size
+                    if (total > 0) {
+                        _isLoading.value = false
+                        val validPage = if (savedPage in 0 until total) savedPage else 0
+                        if (_currentPageIndex.value != validPage) {
+                            _currentPageIndex.value = validPage
+                        }
+                        _readingDirection.value = entity?.readingDirection ?: "LTR"
+                        _scaleType.value = entity?.scaleType ?: "FIT_SCREEN"
+                        _scrollMode.value = entity?.scrollMode ?: "PAGER"
+
+                        prefetchPages(validPage, result.pageFiles)
+                    } else if (!result.isExtracting) {
+                        _isLoading.value = false
+                        _errorMessage.value = "No readable pages found in this comic file."
+                    }
                 }
 
             } catch (e: Exception) {
-                _errorMessage.value = "Failed to open comic: ${e.localizedMessage}"
-            } finally {
                 _isLoading.value = false
+                _errorMessage.value = "Failed to open comic: ${e.localizedMessage}"
             }
         }
     }

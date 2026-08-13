@@ -99,6 +99,7 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   implementation(libs.androidx.room.runtime)
   implementation(libs.coil.compose)
+  implementation("io.coil-kt:coil-gif:2.6.0")
   implementation("io.github.awxkee:jxl-coder-coil:2.2.0")
   implementation("com.github.junrar:junrar:7.5.5")
   implementation("org.apache.commons:commons-compress:1.26.1")

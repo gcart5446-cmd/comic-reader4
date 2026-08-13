@@ -20,6 +20,11 @@ class ComicRepository(private val context: Context) {
 
     fun getComicByUri(uri: String): Flow<ComicEntity?> = comicDao.getComicByUri(uri)
 
+    fun loadComicPagesFlow(uriString: String, initialPage: Int = 0): Flow<ComicPagesResult> {
+        val uri = Uri.parse(uriString)
+        return ComicParser.parseAndExtractFlow(context, uri, initialPage)
+    }
+
     suspend fun loadComicPages(uriString: String): ComicPagesResult {
         val uri = Uri.parse(uriString)
         val result = ComicParser.parseAndExtract(context, uri)
