@@ -100,13 +100,26 @@ class ReaderViewModel(
         )
     }
 
-    val uiState: StateFlow<ReaderUiState> = combine(
+    private val _coreState = combine(
         _parsedResult,
         _currentPageIndex,
+        _isLoading,
+        _errorMessage
+    ) { parsed, pageIdx, loading, error ->
+        Quadruple(parsed, pageIdx, loading, error)
+    }
+
+    val uiState: StateFlow<ReaderUiState> = combine(
+        _coreState,
         _readerSettings,
         comicEntity,
         bookmarks
-    ) { parsed, pageIdx, settings, entity, bmarks ->
+    ) { core, settings, entity, bmarks ->
+        val parsed = core.first
+        val pageIdx = core.second
+        val loading = core.third
+        val errorMsg = core.fourth
+
         ReaderUiState(
             comicUri = comicUri,
             title = entity?.title ?: parsed?.title ?: "Comic",
@@ -123,8 +136,8 @@ class ReaderViewModel(
             isControlsVisible = settings.isControlsVisible,
             isFavorite = entity?.isFavorite ?: false,
             bookmarks = bmarks,
-            isLoading = _isLoading.value,
-            errorMessage = _errorMessage.value,
+            isLoading = loading,
+            errorMessage = errorMsg,
             colorFilter = settings.colorFilter
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ReaderUiState())
@@ -141,6 +154,8 @@ class ReaderViewModel(
                 val entity = AppDatabase.getDatabase(getApplication()).comicDao().getComicByUriSync(comicUri)
                 val savedPage = entity?.lastReadPage ?: 0
 
+                var initialPageSet = false
+
                 repository.loadComicPagesFlow(comicUri, savedPage).collect { result ->
                     _parsedResult.value = result
 
@@ -153,15 +168,19 @@ class ReaderViewModel(
                     val total = result.pageFiles.size
                     if (total > 0) {
                         _isLoading.value = false
-                        val validPage = if (savedPage in 0 until total) savedPage else 0
-                        if (_currentPageIndex.value != validPage) {
-                            _currentPageIndex.value = validPage
+                        if (!initialPageSet) {
+                            initialPageSet = true
+                            val validPage = if (savedPage in 0 until total) savedPage else 0
+                            if (_currentPageIndex.value != validPage) {
+                                _currentPageIndex.value = validPage
+                            }
+                            _readingDirection.value = entity?.readingDirection ?: "LTR"
+                            _scaleType.value = entity?.scaleType ?: "FIT_SCREEN"
+                            _scrollMode.value = entity?.scrollMode ?: "PAGER"
+                            prefetchPages(validPage, result.pageFiles)
+                        } else {
+                            prefetchPages(_currentPageIndex.value, result.pageFiles)
                         }
-                        _readingDirection.value = entity?.readingDirection ?: "LTR"
-                        _scaleType.value = entity?.scaleType ?: "FIT_SCREEN"
-                        _scrollMode.value = entity?.scrollMode ?: "PAGER"
-
-                        prefetchPages(validPage, result.pageFiles)
                     } else if (!result.isExtracting) {
                         _isLoading.value = false
                         _errorMessage.value = "No readable pages found in this comic file."

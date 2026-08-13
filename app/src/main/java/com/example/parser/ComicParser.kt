@@ -25,7 +25,7 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.flowOn
 
 data class ComicPagesResult(
@@ -50,7 +50,7 @@ object ComicParser {
         uri: Uri,
         initialPage: Int = 0,
         customTitle: String? = null
-    ): Flow<ComicPagesResult> = flow {
+    ): Flow<ComicPagesResult> = channelFlow {
         val uriString = uri.toString()
         val fileName = customTitle ?: getFileNameFromUri(context, uri)
 
@@ -61,7 +61,7 @@ object ComicParser {
         if (cacheBaseDir.exists()) {
             val cachedPages = collectAndSortImagePages(cacheBaseDir)
             if (cachedPages.isNotEmpty()) {
-                emit(
+                send(
                     ComicPagesResult(
                         comicUri = uriString,
                         title = sanitizeTitle(fileName),
@@ -71,26 +71,64 @@ object ComicParser {
                         isExtracting = false
                     )
                 )
-                return@flow
+                return@channelFlow
             }
         }
 
-        emit(
+        val formatExt = detectExtensionFromFileOrUri(context, uri, fileName, null)
+        val title = sanitizeTitle(fileName)
+        val badge = formatBadge(formatExt)
+
+        send(
             ComicPagesResult(
                 comicUri = uriString,
-                title = sanitizeTitle(fileName),
-                format = "...",
+                title = title,
+                format = badge,
                 pageFiles = emptyList(),
                 coverFile = null,
                 isExtracting = true
             )
         )
 
-        val result = parseAndExtract(context, uri, customTitle)
-        emit(result.copy(isExtracting = false))
+        var lastEmitCount = 0
+        var lastEmitTime = 0L
+
+        val onEntryExtracted: (File) -> Unit = { _ ->
+            val now = System.currentTimeMillis()
+            val currentPages = collectAndSortImagePages(cacheBaseDir)
+            if (currentPages.size > lastEmitCount && (currentPages.size <= 3 || now - lastEmitTime >= 150)) {
+                lastEmitCount = currentPages.size
+                lastEmitTime = now
+                trySend(
+                    ComicPagesResult(
+                        comicUri = uriString,
+                        title = title,
+                        format = badge,
+                        pageFiles = currentPages,
+                        coverFile = currentPages.firstOrNull(),
+                        isExtracting = true
+                    )
+                )
+            }
+        }
+
+        val result = parseAndExtract(context, uri, customTitle, onEntryExtracted)
+        val finalPages = if (result.pageFiles.isNotEmpty()) result.pageFiles else collectAndSortImagePages(cacheBaseDir)
+        send(
+            result.copy(
+                pageFiles = finalPages,
+                coverFile = finalPages.firstOrNull(),
+                isExtracting = false
+            )
+        )
     }.flowOn(Dispatchers.IO)
 
-    suspend fun parseAndExtract(context: Context, uri: Uri, customTitle: String? = null): ComicPagesResult = withContext(Dispatchers.IO) {
+    suspend fun parseAndExtract(
+        context: Context,
+        uri: Uri,
+        customTitle: String? = null,
+        onEntryExtracted: ((File) -> Unit)? = null
+    ): ComicPagesResult = withContext(Dispatchers.IO) {
         val uriString = uri.toString()
         val fileName = customTitle ?: getFileNameFromUri(context, uri)
 
@@ -118,7 +156,7 @@ object ComicParser {
 
         val cacheBaseDir = File(context.cacheDir, "extracted_comics/$hash")
 
-        // Clean up old extracted comic caches if total cache exceeds 500 MB or 10 folders
+        // Clean up old extracted comic caches if total cache exceeds 500 MB
         cleanCacheDirIfNeeded(File(context.cacheDir, "extracted_comics"), maxSizeBytes = 500 * 1024 * 1024L)
 
         // 1. Check if comic is already extracted and cached
@@ -150,7 +188,7 @@ object ComicParser {
         try {
             if (inputFile != null && inputFile.exists() && inputFile.length() > 0) {
                 // Unpack root archive
-                isPasswordProtected = unpackArchiveRecursive(inputFile, cacheBaseDir, formatExtension, depth = 0)
+                isPasswordProtected = unpackArchiveRecursive(inputFile, cacheBaseDir, formatExtension, depth = 0, onEntryExtracted = onEntryExtracted)
 
                 // Unroll any discovered nested archives
                 unrollNestedArchives(cacheBaseDir, maxDepth = 5)
@@ -181,7 +219,13 @@ object ComicParser {
         )
     }
 
-    private fun unpackArchiveRecursive(sourceFile: File, destDir: File, format: String, depth: Int): Boolean {
+    private fun unpackArchiveRecursive(
+        sourceFile: File,
+        destDir: File,
+        format: String,
+        depth: Int,
+        onEntryExtracted: ((File) -> Unit)? = null
+    ): Boolean {
         if (depth > 5) return false
 
         return when (format.lowercase(Locale.ROOT)) {
@@ -190,26 +234,27 @@ object ComicParser {
                 false
             }
             "cbz", "zip" -> {
-                extractZipFile(sourceFile, destDir)
+                extractZipFile(sourceFile, destDir, onEntryExtracted)
             }
             "cbr", "rar" -> {
-                extractRar(sourceFile, destDir)
+                extractRar(sourceFile, destDir, onEntryExtracted)
             }
             "cb7", "7z" -> {
-                extract7z(sourceFile, destDir)
+                extract7z(sourceFile, destDir, onEntryExtracted)
             }
             "cbt", "tar" -> {
-                extractTarFile(sourceFile, destDir)
+                extractTarFile(sourceFile, destDir, onEntryExtracted)
             }
             in IMAGE_EXTENSIONS -> {
                 val destPage = File(destDir, "page_0001.${format}")
                 sourceFile.copyTo(destPage, overwrite = true)
+                onEntryExtracted?.invoke(destPage)
                 false
             }
             else -> {
-                val success = tryExtractZip(sourceFile, destDir) ||
-                        tryExtractRar(sourceFile, destDir) ||
-                        tryExtract7z(sourceFile, destDir) ||
+                val success = tryExtractZip(sourceFile, destDir, onEntryExtracted) ||
+                        tryExtractRar(sourceFile, destDir, onEntryExtracted) ||
+                        tryExtract7z(sourceFile, destDir, onEntryExtracted) ||
                         tryExtractPdf(sourceFile, destDir)
                 if (!success) {
                     Log.w(TAG, "Unknown format fallback failed for ${sourceFile.name}")
@@ -384,7 +429,7 @@ object ComicParser {
         return if (totalRead == count) buf else buf.copyOf(totalRead)
     }
 
-    private fun extractZipFile(zipFile: File, destDir: File): Boolean {
+    private fun extractZipFile(zipFile: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
         try {
             ZipFile(zipFile).use { zip ->
@@ -416,6 +461,7 @@ object ComicParser {
                                 }
                             }
                         }
+                        onEntryExtracted?.invoke(outFile)
                     } catch (e: Exception) {
                         val msg = e.message ?: ""
                         if (msg.contains("encrypted", ignoreCase = true) || msg.contains("password", ignoreCase = true)) {
@@ -432,14 +478,14 @@ object ComicParser {
                 Log.e(TAG, "ZIP archive is password protected: $msg")
             }
             Log.w(TAG, "ZipFile failed, fallback to ZipInputStream: ${e.message}")
-            if (tryExtractZipStream(zipFile, destDir)) {
+            if (tryExtractZipStream(zipFile, destDir, onEntryExtracted)) {
                 isEncrypted = true
             }
         }
         return isEncrypted
     }
 
-    private fun tryExtractZipStream(zipFile: File, destDir: File): Boolean {
+    private fun tryExtractZipStream(zipFile: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
         try {
             ZipInputStream(BufferedInputStream(FileInputStream(zipFile), 262144)).use { zipIn ->
@@ -463,22 +509,33 @@ object ComicParser {
                         if (!entry.isDirectory) {
                             val ext = entryName.substringAfterLast('.', "").lowercase(Locale.ROOT)
                             val needsSniffing = ext.isEmpty() || (ext !in IMAGE_EXTENSIONS && ext !in ARCHIVE_EXTENSIONS && ext !in NON_MEDIA_EXTENSIONS)
-                            val sample = if (needsSniffing) {
-                                try {
-                                    zipIn.mark(16)
-                                    zipIn.readSampleBytes(16)
-                                } catch (_: Exception) { null }
-                            } else null
 
-                            if (isSupportedMediaEntry(entryName, sample)) {
-                                val outFile = File(destDir, sanitizeEntryPath(entryName))
-                                outFile.parentFile?.mkdirs()
-                                BufferedOutputStream(FileOutputStream(outFile), 262144).use { out ->
-                                    var read: Int
-                                    while (zipIn.read(buffer).also { read = it } != -1) {
-                                        out.write(buffer, 0, read)
+                            if (needsSniffing) {
+                                val outStream = java.io.ByteArrayOutputStream()
+                                var read: Int
+                                while (zipIn.read(buffer).also { read = it } != -1) {
+                                    outStream.write(buffer, 0, read)
+                                }
+                                val entryBytes = outStream.toByteArray()
+                                val sample = entryBytes.copyOf(minOf(16, entryBytes.size))
+                                if (isSupportedMediaEntry(entryName, sample)) {
+                                    val outFile = File(destDir, sanitizeEntryPath(entryName))
+                                    outFile.parentFile?.mkdirs()
+                                    outFile.writeBytes(entryBytes)
+                                    onEntryExtracted?.invoke(outFile)
+                                }
+                            } else {
+                                if (isSupportedMediaEntry(entryName, null)) {
+                                    val outFile = File(destDir, sanitizeEntryPath(entryName))
+                                    outFile.parentFile?.mkdirs()
+                                    BufferedOutputStream(FileOutputStream(outFile), 262144).use { out ->
+                                        var read: Int
+                                        while (zipIn.read(buffer).also { read = it } != -1) {
+                                            out.write(buffer, 0, read)
+                                        }
+                                        out.flush()
                                     }
-                                    out.flush()
+                                    onEntryExtracted?.invoke(outFile)
                                 }
                             }
                         }
@@ -503,7 +560,7 @@ object ComicParser {
         return isEncrypted
     }
 
-    private fun extractRar(rarFile: File, destDir: File): Boolean {
+    private fun extractRar(rarFile: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
         try {
             Archive(rarFile).use { archive ->
@@ -529,6 +586,7 @@ object ComicParser {
                                         archive.extractFile(header, out)
                                         out.flush()
                                     }
+                                    onEntryExtracted?.invoke(outFile)
                                 }
                             }
                         }
@@ -552,7 +610,7 @@ object ComicParser {
         return isEncrypted
     }
 
-    private fun extract7z(file7z: File, destDir: File): Boolean {
+    private fun extract7z(file7z: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
         try {
             SevenZFile.Builder().setFile(file7z).get().use { sevenZFile ->
@@ -565,19 +623,33 @@ object ComicParser {
                             if (entryName.isNotEmpty()) {
                                 val ext = entryName.substringAfterLast('.', "").lowercase(Locale.ROOT)
                                 val needsSniffing = ext.isEmpty() || (ext !in IMAGE_EXTENSIONS && ext !in ARCHIVE_EXTENSIONS && ext !in NON_MEDIA_EXTENSIONS)
-                                val sample = if (needsSniffing) {
-                                    try { sevenZFile.readSampleBytes(16) } catch (_: Exception) { null }
-                                } else null
 
-                                if (isSupportedMediaEntry(entryName, sample)) {
-                                    val outFile = File(destDir, sanitizeEntryPath(entryName))
-                                    outFile.parentFile?.mkdirs()
-                                    BufferedOutputStream(FileOutputStream(outFile), 262144).use { out ->
-                                        var bytesRead: Int
-                                        while (sevenZFile.read(buffer).also { bytesRead = it } != -1) {
-                                            out.write(buffer, 0, bytesRead)
+                                if (needsSniffing) {
+                                    val outStream = java.io.ByteArrayOutputStream()
+                                    var bytesRead: Int
+                                    while (sevenZFile.read(buffer).also { bytesRead = it } != -1) {
+                                        outStream.write(buffer, 0, bytesRead)
+                                    }
+                                    val entryBytes = outStream.toByteArray()
+                                    val sample = entryBytes.copyOf(minOf(16, entryBytes.size))
+                                    if (isSupportedMediaEntry(entryName, sample)) {
+                                        val outFile = File(destDir, sanitizeEntryPath(entryName))
+                                        outFile.parentFile?.mkdirs()
+                                        outFile.writeBytes(entryBytes)
+                                        onEntryExtracted?.invoke(outFile)
+                                    }
+                                } else {
+                                    if (isSupportedMediaEntry(entryName, null)) {
+                                        val outFile = File(destDir, sanitizeEntryPath(entryName))
+                                        outFile.parentFile?.mkdirs()
+                                        BufferedOutputStream(FileOutputStream(outFile), 262144).use { out ->
+                                            var bytesRead: Int
+                                            while (sevenZFile.read(buffer).also { bytesRead = it } != -1) {
+                                                out.write(buffer, 0, bytesRead)
+                                            }
+                                            out.flush()
                                         }
-                                        out.flush()
+                                        onEntryExtracted?.invoke(outFile)
                                     }
                                 }
                             }
@@ -602,7 +674,7 @@ object ComicParser {
         return isEncrypted
     }
 
-    private fun extractTarFile(tarFile: File, destDir: File): Boolean {
+    private fun extractTarFile(tarFile: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         var isEncrypted = false
         try {
             TarArchiveInputStream(BufferedInputStream(FileInputStream(tarFile))).use { tarIn ->
@@ -615,22 +687,33 @@ object ComicParser {
                             if (entryName.isNotEmpty() && !entryName.startsWith("__MACOSX") && !entryName.startsWith(".")) {
                                 val ext = entryName.substringAfterLast('.', "").lowercase(Locale.ROOT)
                                 val needsSniffing = ext.isEmpty() || (ext !in IMAGE_EXTENSIONS && ext !in ARCHIVE_EXTENSIONS && ext !in NON_MEDIA_EXTENSIONS)
-                                val sample = if (needsSniffing) {
-                                    try {
-                                        tarIn.mark(16)
-                                        tarIn.readSampleBytes(16)
-                                    } catch (_: Exception) { null }
-                                } else null
 
-                                if (isSupportedMediaEntry(entryName, sample)) {
-                                    val outFile = File(destDir, sanitizeEntryPath(entryName))
-                                    outFile.parentFile?.mkdirs()
-                                    BufferedOutputStream(FileOutputStream(outFile), 65536).use { out ->
-                                        var read: Int
-                                        while (tarIn.read(buffer).also { read = it } != -1) {
-                                            out.write(buffer, 0, read)
+                                if (needsSniffing) {
+                                    val outStream = java.io.ByteArrayOutputStream()
+                                    var read: Int
+                                    while (tarIn.read(buffer).also { read = it } != -1) {
+                                        outStream.write(buffer, 0, read)
+                                    }
+                                    val entryBytes = outStream.toByteArray()
+                                    val sample = entryBytes.copyOf(minOf(16, entryBytes.size))
+                                    if (isSupportedMediaEntry(entryName, sample)) {
+                                        val outFile = File(destDir, sanitizeEntryPath(entryName))
+                                        outFile.parentFile?.mkdirs()
+                                        outFile.writeBytes(entryBytes)
+                                        onEntryExtracted?.invoke(outFile)
+                                    }
+                                } else {
+                                    if (isSupportedMediaEntry(entryName, null)) {
+                                        val outFile = File(destDir, sanitizeEntryPath(entryName))
+                                        outFile.parentFile?.mkdirs()
+                                        BufferedOutputStream(FileOutputStream(outFile), 65536).use { out ->
+                                            var read: Int
+                                            while (tarIn.read(buffer).also { read = it } != -1) {
+                                                out.write(buffer, 0, read)
+                                            }
+                                            out.flush()
                                         }
-                                        out.flush()
+                                        onEntryExtracted?.invoke(outFile)
                                     }
                                 }
                             }
@@ -684,23 +767,23 @@ object ComicParser {
         }
     }
 
-    private fun tryExtractZip(file: File, destDir: File): Boolean {
+    private fun tryExtractZip(file: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         return try {
-            extractZipFile(file, destDir)
+            extractZipFile(file, destDir, onEntryExtracted)
             collectAndSortImagePages(destDir).isNotEmpty()
         } catch (_: Throwable) { false }
     }
 
-    private fun tryExtractRar(file: File, destDir: File): Boolean {
+    private fun tryExtractRar(file: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         return try {
-            extractRar(file, destDir)
+            extractRar(file, destDir, onEntryExtracted)
             collectAndSortImagePages(destDir).isNotEmpty()
         } catch (_: Throwable) { false }
     }
 
-    private fun tryExtract7z(file: File, destDir: File): Boolean {
+    private fun tryExtract7z(file: File, destDir: File, onEntryExtracted: ((File) -> Unit)? = null): Boolean {
         return try {
-            extract7z(file, destDir)
+            extract7z(file, destDir, onEntryExtracted)
             collectAndSortImagePages(destDir).isNotEmpty()
         } catch (_: Throwable) { false }
     }
